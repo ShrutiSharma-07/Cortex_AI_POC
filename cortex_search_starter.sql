@@ -1,6 +1,3 @@
-create table test1 as select 1 as col1;
-
-drop table test1;
 
 create or replace stage policy_documents encryption = (TYPE = 'SNOWFLAKE_SSE') DIRECTORY = (ENABLE = TRUE);
 
@@ -66,18 +63,56 @@ insert into POLICY_DOCS_CHUNKS (relative_path, size, file_url,
 
 select * from POLICY_DOCS_CHUNKS;
 
--- We know that all these docs are policy docs, just set categories.
--- In future, map policies or use classify_text 
-update POLICY_DOCS_CHUNKS set CATEGORY = 'POLICY';
 
-/*
------
------ You can set categories using snowflake classify text with the below code is desirable - you may also want to map it manually to ensure it is correct.
------
 
--- POC_POLICY.PROCUREMENT_POLICY.POLICY_DOCUMENTS
+CREATE OR REPLACE TEMPORARY TABLE docs_categories AS 
+WITH unique_documents AS (
+  SELECT
+    DISTINCT relative_path, chunk
+  FROM
+    POLICY_DOCS_CHUNKS
+  WHERE 
+    chunk_index = 0
+  ),
+ docs_category_cte AS (
+  SELECT
+    relative_path,
+    CASE 
+      WHEN CONTAINS(relative_path, '-') THEN 
+        SPLIT_PART(
+          SPLIT_PART(relative_path, '/', -1), -- Get filename from path
+          '-', 1                              -- Get part before first hyphen
+        )
+      ELSE 
+        'UNCATEGORIZED'
+    END AS category
+  FROM
+    unique_documents
+)
+SELECT
+  *
+FROM
+  docs_category_cte;
 
-*/
+
+  
+
+select * from docs_categories
+
+
+
+update POLICY_DOCS_CHUNKS 
+  SET category = docs_categories.category
+  from docs_categories
+  where  POLICY_DOCS_CHUNKS.relative_path = docs_categories.relative_path;
+
+
+--update POLICY_DOCS_CHUNKS set CATEGORY = 'POLICY';
+
+select * from POLICY_DOCS_CHUNKS;
+
+
+
 
 CREATE OR REPLACE CORTEX SEARCH SERVICE POLICY_SEARCH_SERVICE 
 on chunk
@@ -93,7 +128,4 @@ select
     category 
     from POLICY_DOCS_CHUNKS
 );
-
-
-
 
