@@ -81,7 +81,7 @@ def initialize_chat_history_table():
         return True
         
     except Exception as e:
-        st.sidebar.error(f"❌ Error with chat history table: {str(e)}")
+        st.sidebar.error(f"Error with chat history table: {str(e)}")
         return False
 
 def get_current_user():
@@ -129,7 +129,7 @@ def create_source_document_links(source_docs):
 
 
 def update_feedback(interaction_id, feedback):
-    """Update feedback for a specific interaction - FIXED VERSION"""
+    """Update feedback for a specific interaction"""
     try:
         # Simple, direct update using proper SQL escaping
         update_sql = f"""
@@ -160,7 +160,7 @@ def update_feedback(interaction_id, feedback):
         return False
 
 def handle_feedback_buttons():
-    """Handle feedback buttons - FIXED VERSION"""
+    """Handle feedback buttons"""
     if not hasattr(st.session_state, 'latest_interaction_id') or not st.session_state.latest_interaction_id:
         return
     
@@ -191,7 +191,7 @@ def handle_feedback_buttons():
     
     current_feedback = st.session_state[feedback_session_key]
     
-    st.markdown("**Was this response helpful?**")
+    st.caption("**Was this response helpful?**")
     col1, col2, col3 = st.columns([1, 1, 6])
     
     with col1:
@@ -291,7 +291,7 @@ def store_chat_interaction(question, response, model_name, category, source_docs
             return False
         
     except Exception as e:
-        st.sidebar.error(f"❌ Storage failed: {str(e)}")
+        st.sidebar.error(f"Storage failed: {str(e)}")
         return False
 
 
@@ -313,7 +313,7 @@ def config_options():
                           'llama3.1-70b',     
                           'llama3.1-8b', 
                           'snowflake-arctic'), 
-                         key="model_name")
+                    key="model_name")
 
     categories = session.table('policy_docs_chunks').select('category').distinct().collect()
 
@@ -329,28 +329,37 @@ def config_options():
     st.sidebar.title("**Chat History**")
 
     st.sidebar.checkbox('Remember chat history', key="use_chat_history", value = True)
-    st.sidebar.checkbox('Store conversations in database', key="store_conversations", value = True)
+    #st.sidebar.checkbox('Store conversations in database', key="store_conversations", value = True)
 
     st.sidebar.checkbox('Summary of previous chat', key="debug", value = True)
     
-    # Show previous conversation summary
+    # FIXED: Show previous conversation summary using actual response
     if st.session_state.debug:
         if hasattr(st.session_state, 'messages') and st.session_state.messages and len(st.session_state.messages) >= 2:
+            # Get the last question-answer pair
             previous_question = st.session_state.messages[-2]['content']
+            previous_answer = st.session_state.messages[-1]['content']  # Get the actual answer
             
-            if not hasattr(st.session_state, 'previous_question_summary') or st.session_state.previous_question_summary is None:
+            # Check if we need to generate a new summary
+            summary_key = f"summary_{len(st.session_state.messages)}"
+            if summary_key not in st.session_state:
                 summary_prompt = f"""
-                    Summarize the answer you provided for this question in a concise way (1-2 sentences):
-                    {previous_question}
+                    Summarize the following answer in 1-2 sentences. Be concise and capture the key points:
+                    
+                    Question: {previous_question}
+                    Answer: {previous_answer}
+                    
+                    Provide only a brief summary of the answer:
                     """
                 try:
                     summary = Complete(st.session_state.model_name, summary_prompt).replace("'", "")
-                    st.session_state.previous_question_summary = f"Question: {previous_question}\n\nSummary: {summary}"
-                except:
-                    st.session_state.previous_question_summary = f"Question: {previous_question}"
+                    st.session_state[summary_key] = f"Question: {previous_question}\n\nSummary: {summary}"
+                except Exception as e:
+                    # Fallback to truncated answer if summary generation fails
+                    st.session_state[summary_key] = f"Question: {previous_question}\n\nAnswer: {previous_answer[:200]}..."
             
             st.sidebar.text("Previous Chat Summary:")
-            st.sidebar.caption(st.session_state.previous_question_summary)
+            st.sidebar.caption(st.session_state[summary_key])
     
     st.sidebar.button("Start Over", key="clear_conversation", on_click=init_messages, type="primary")
     st.sidebar.markdown("---")
@@ -365,6 +374,10 @@ def init_messages():
         st.session_state.latest_interaction_id = None
         # Clear feedback state when starting over
         clear_feedback_state()
+        # Clear all summary keys
+        summary_keys_to_remove = [key for key in st.session_state.keys() if key.startswith('summary_')]
+        for key in summary_keys_to_remove:
+            del st.session_state[key]
 
 
 def get_similar_chunks_search_service(query):
@@ -547,7 +560,7 @@ def main():
     # ALWAYS show feedback buttons if there's a latest interaction
     # This ensures they persist even after page refreshes or new questions
     if hasattr(st.session_state, 'latest_interaction_id') and st.session_state.latest_interaction_id:
-        st.markdown("---")  # Add separator before feedback section
+        #st.markdown("---")  # Add separator before feedback section
         handle_feedback_buttons()
     
     # Show direct download links for current chat documents
