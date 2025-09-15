@@ -524,12 +524,12 @@ def create_prompt(myquestion):
         chat_history = ""
   
     prompt = f"""
-           You are an expert chat assistance that extracts information from the CONTEXT provided
+           You are an expert chat assistant that extracts information from the CONTEXT provided
            between <context> and </context> tags.
            You offer a chat experience considering the information included in the CHAT HISTORY
            provided between <chat_history> and </chat_history> tags..
            When answering the question contained between <question> and </question> tags
-           be concise and do not hallucinate. 
+           be detailed, covering all the relevant information but do not hallucinate. 
            If you don´t have the information just say so.
            
            Do not mention the CONTEXT used in your answer.
@@ -661,7 +661,7 @@ def main():
         #st.markdown("---")  # Add separator before feedback section
         handle_feedback_buttons()
     
-    # Show direct download links for current chat documents
+    # # Show direct download links for current chat documents
     if hasattr(st.session_state, 'last_relative_paths') and st.session_state.last_relative_paths:
         st.sidebar.title("**Context Documentation**")
         st.sidebar.markdown("(Current Chat)")
@@ -672,10 +672,11 @@ def main():
                 url_link = df_url_link._get_value(0,'URL_LINK')
                 
                 doc_name = path.split('/')[-1]
-                st.sidebar.markdown(f"📄 [{doc_name}]({url_link})")
-                
+                st.sidebar.markdown(f'📄 <a href="{url_link}" target="_blank">{doc_name}</a>', unsafe_allow_html=True)
+        
             except Exception as e:
                 st.sidebar.caption(f"Error loading {path}")
+
     
     # Show source data button
     if hasattr(st.session_state, 'last_chunks_data') and st.session_state.last_chunks_data:
