@@ -32,7 +32,7 @@ svc = root.databases[CORTEX_SEARCH_DATABASE].schemas[CORTEX_SEARCH_SCHEMA].corte
 ### Chat History Storage Functions
 
 def initialize_chat_history_table():
-    """Create or alter chat history table to include user column, feedback column, and hallucination flag"""
+    """Create or alter chat history table to include user column, feedback column, hallucination flag, and review column"""
     try:
         # Create table if it doesn't exist
         create_table_sql = """
@@ -46,14 +46,15 @@ def initialize_chat_history_table():
             SOURCE_DOCUMENTS STRING,
             RESPONSE_TIME_MS INTEGER,
             USER_NAME STRING,
-            USER_FEEDBACK STRING,
-            IS_HALLUCINATION STRING
+            RESPONSE_QUALITY STRING,
+            IS_HALLUCINATION STRING,
+            REVIEW_FEEDBACK STRING
         )
         """
         session.sql(create_table_sql).collect()
         
         # Check if required columns exist, if not add them
-        columns_to_check = ['USER_NAME', 'USER_FEEDBACK', 'IS_HALLUCINATION']
+        columns_to_check = ['USER_NAME', 'RESPONSE_QUALITY', 'IS_HALLUCINATION', 'REVIEW_FEEDBACK']
         
         for column_name in columns_to_check:
             try:
@@ -78,12 +79,284 @@ def initialize_chat_history_table():
             except Exception as e:
                 st.sidebar.warning(f"Column check/add issue for {column_name}: {str(e)}")
         
-        #st.sidebar.info("Chat history table ready!")
         return True
         
     except Exception as e:
         st.sidebar.error(f"Error with chat history table: {str(e)}")
         return False
+
+def update_review_feedback(interaction_id, review_text):
+    """Update review feedback for a specific interaction"""
+    try:
+        # Escape single quotes in the review text
+        review_text_escaped = review_text.replace("'", "''") if review_text else ""
+        
+        update_sql = f"""
+        UPDATE POC_POLICY.PROCUREMENT_POLICY.CHAT_HISTORY 
+        SET REVIEW_FEEDBACK = '{review_text_escaped}'
+        WHERE INTERACTION_ID = '{interaction_id}'
+        """
+        
+        # Execute the update
+        session.sql(update_sql).collect()
+        
+        # Verify the update worked by checking the row
+        verify_sql = f"""
+        SELECT REVIEW_FEEDBACK, INTERACTION_ID
+        FROM POC_POLICY.PROCUREMENT_POLICY.CHAT_HISTORY 
+        WHERE INTERACTION_ID = '{interaction_id}'
+        """
+        verify_result = session.sql(verify_sql).collect()
+        
+        if verify_result:
+            updated_review = verify_result[0]['REVIEW_FEEDBACK']
+            return updated_review == review_text_escaped
+        else:
+            return False
+            
+    except Exception as e:
+        st.error(f"Error updating review feedback: {str(e)}")
+        return False
+
+def handle_feedback_buttons():
+    """Handle feedback buttons including hallucination detection and review text box"""
+    if not hasattr(st.session_state, 'latest_interaction_id') or not st.session_state.latest_interaction_id:
+        return
+    
+    interaction_id = st.session_state.latest_interaction_id
+    
+    # Create unique keys for this interaction's feedback, hallucination, and review status in session state
+    feedback_session_key = f"feedback_status_{interaction_id}"
+    hallucination_session_key = f"hallucination_status_{interaction_id}"
+    review_session_key = f"review_status_{interaction_id}"
+    
+    # Initialize feedback, hallucination, and review status if not in session state
+    if (feedback_session_key not in st.session_state or 
+        hallucination_session_key not in st.session_state or 
+        review_session_key not in st.session_state):
+        try:
+            # Check which columns exist
+            check_columns_sql = """
+            SELECT COLUMN_NAME 
+            FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_SCHEMA = 'PROCUREMENT_POLICY' 
+            AND TABLE_NAME = 'CHAT_HISTORY' 
+            AND COLUMN_NAME IN ('RESPONSE_QUALITY', 'IS_HALLUCINATION', 'REVIEW_FEEDBACK')
+            """
+            column_result = session.sql(check_columns_sql).collect()
+            existing_columns = [row['COLUMN_NAME'] for row in column_result]
+            
+            # Build query based on existing columns
+            select_fields = ['RESPONSE_QUALITY'] 
+            if 'IS_HALLUCINATION' in existing_columns:
+                select_fields.append('IS_HALLUCINATION')
+            if 'REVIEW_FEEDBACK' in existing_columns:
+                select_fields.append('REVIEW_FEEDBACK')
+            
+            check_sql = f"""
+            SELECT {', '.join(select_fields)}
+            FROM POC_POLICY.PROCUREMENT_POLICY.CHAT_HISTORY 
+            WHERE INTERACTION_ID = '{interaction_id}'
+            """
+            result = session.sql(check_sql).collect()
+            
+            if result:
+                st.session_state[feedback_session_key] = result[0]['RESPONSE_QUALITY']
+                # Handle IS_HALLUCINATION column
+                if 'IS_HALLUCINATION' in existing_columns:
+                    st.session_state[hallucination_session_key] = result[0]['IS_HALLUCINATION']
+                else:
+                    st.session_state[hallucination_session_key] = None
+                # Handle REVIEW_FEEDBACK column
+                if 'REVIEW_FEEDBACK' in existing_columns:
+                    st.session_state[review_session_key] = result[0]['REVIEW_FEEDBACK']
+                else:
+                    st.session_state[review_session_key] = None
+            else:
+                st.session_state[feedback_session_key] = None
+                st.session_state[hallucination_session_key] = None
+                st.session_state[review_session_key] = None
+                
+        except Exception as e:
+            st.error(f"Error checking feedback: {str(e)}")
+            st.session_state[feedback_session_key] = None
+            st.session_state[hallucination_session_key] = None
+            st.session_state[review_session_key] = None
+    
+    # Ensure all keys exist in session state
+    for key in [feedback_session_key, hallucination_session_key, review_session_key]:
+        if key not in st.session_state:
+            st.session_state[key] = None
+    
+    current_feedback = st.session_state[feedback_session_key]
+    current_hallucination = st.session_state[hallucination_session_key]
+    current_review = st.session_state[review_session_key] or ""
+    
+    st.caption("**Was this response helpful?**")
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 3])
+    
+    with col1:
+        # Thumbs up button
+        if current_feedback == 'good':
+            button_label = "👍 ✓"
+            button_help = "You rated this as good"
+        else:
+            button_label = "👍 "
+            button_help = "Rate as good"
+        
+        if st.button(button_label, 
+                    key=f"thumbs_up_{interaction_id}",
+                    help=button_help):
+            
+            if current_feedback != 'good':
+                if update_feedback(interaction_id, 'good'):
+                    st.session_state[feedback_session_key] = 'good'
+                    st.rerun()
+                else:
+                    st.error("Failed to save feedback. Please try again.")
+    
+    with col2:
+        # Thumbs down button
+        if current_feedback == 'bad':
+            button_label = "👎 ✓"
+            button_help = "You rated this as bad"
+        else:
+            button_label = "👎 "
+            button_help = "Rate as bad"
+        
+        if st.button(button_label, 
+                    key=f"thumbs_down_{interaction_id}",
+                    help=button_help):
+            
+            if current_feedback != 'bad':
+                if update_feedback(interaction_id, 'bad'):
+                    st.session_state[feedback_session_key] = 'bad'
+                    st.rerun()
+                else:
+                    st.error("Failed to save feedback. Please try again.")
+    
+    with col3:
+        # Hallucination - Yes button
+        if current_hallucination == 'Yes':
+            button_label = "🚫 ✓"
+            button_help = "You marked this as hallucination"
+        else:
+            button_label = "🚫"
+            button_help = "Mark as hallucination"
+        
+        if st.button(button_label, 
+                    key=f"hallucination_yes_{interaction_id}",
+                    help=button_help):
+            
+            if current_hallucination != 'Yes':
+                if update_hallucination_flag(interaction_id, 'Yes'):
+                    st.session_state[hallucination_session_key] = 'Yes'
+                    st.rerun()
+                else:
+                    st.error("Failed to save hallucination flag. Please try again.")
+    
+    with col4:
+        # Review text input with submit button
+        review_text = st.text_input(
+            label="**Feedback**",
+            value=current_review,
+            key=f"review_input_{interaction_id}",
+            placeholder="Enter your detailed review here...",
+            help="Provide additional comments or feedback about this response",
+            label_visibility="collapsed"
+        )
+        
+        # Only show submit button if there's text and it's different from current stored review
+        if review_text.strip() and review_text.strip() != (current_review or "").strip():
+            if st.button("💾 Save Review", 
+                        key=f"save_review_{interaction_id}",
+                        help="Save your review"):
+                if update_review_feedback(interaction_id, review_text.strip()):
+                    st.session_state[review_session_key] = review_text.strip()
+                    st.success("Review saved successfully!")
+                    st.rerun()
+                else:
+                    st.error("Failed to save review. Please try again.")
+
+def store_chat_interaction(question, response, model_name, category, source_docs, response_time_ms):
+    """Store chat interaction - UPDATED VERSION with review feedback column (with fallback)"""
+    try:
+        # Get current user
+        current_user = get_current_user()
+        
+        # Create source document links
+        source_links = create_source_document_links(source_docs)
+        
+        # Truncate fields to avoid size issues
+        question_safe = question[:500] if question else ""
+        response_safe = response[:1000] if response else ""
+        source_links_safe = source_links[:2000] if source_links else ""
+        
+        # Check if REVIEW_FEEDBACK column exists
+        check_review_column_sql = """
+        SELECT COLUMN_NAME 
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_SCHEMA = 'PROCUREMENT_POLICY' 
+        AND TABLE_NAME = 'CHAT_HISTORY' 
+        AND COLUMN_NAME = 'REVIEW_FEEDBACK'
+        """
+        review_column_exists = len(session.sql(check_review_column_sql).collect()) > 0
+        
+        if review_column_exists:
+            # Use the full insert with REVIEW_FEEDBACK column
+            insert_sql = """
+            INSERT INTO POC_POLICY.PROCUREMENT_POLICY.CHAT_HISTORY 
+            (USER_QUESTION, AI_RESPONSE, MODEL_USED, CATEGORY_FILTER, SOURCE_DOCUMENTS, RESPONSE_TIME_MS, USER_NAME, RESPONSE_QUALITY, IS_HALLUCINATION, REVIEW_FEEDBACK)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+            """
+        else:
+            # Fallback to insert without REVIEW_FEEDBACK column
+            insert_sql = """
+            INSERT INTO POC_POLICY.PROCUREMENT_POLICY.CHAT_HISTORY 
+            (USER_QUESTION, AI_RESPONSE, MODEL_USED, CATEGORY_FILTER, SOURCE_DOCUMENTS, RESPONSE_TIME_MS, USER_NAME, RESPONSE_QUALITY, IS_HALLUCINATION)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+            """
+        
+        session.sql(insert_sql, params=[
+            question_safe,
+            response_safe, 
+            model_name,
+            category,
+            source_links_safe,
+            response_time_ms,
+            current_user
+        ]).collect()
+        
+        # Get the interaction ID of the just-inserted record
+        get_latest_sql = """
+        SELECT INTERACTION_ID 
+        FROM POC_POLICY.PROCUREMENT_POLICY.CHAT_HISTORY 
+        WHERE USER_NAME = ? 
+        ORDER BY TIMESTAMP DESC 
+        LIMIT 1
+        """
+        result = session.sql(get_latest_sql, params=[current_user]).collect()
+        
+        if result:
+            latest_interaction_id = result[0]['INTERACTION_ID']
+            st.session_state.latest_interaction_id = latest_interaction_id
+            return True
+        else:
+            return False
+        
+    except Exception as e:
+        st.sidebar.error(f"Storage failed: {str(e)}")
+        return False
+
+def clear_feedback_state():
+    """Clear feedback state when starting new conversation"""
+    # Clear all feedback-related session state including review feedback
+    keys_to_remove = [key for key in st.session_state.keys() if 
+                     key.startswith('feedback_') or 
+                     key.startswith('hallucination_') or 
+                     key.startswith('review_')]
+    for key in keys_to_remove:
+        del st.session_state[key]
 
 def get_current_user():
     """Get the current user from Streamlit"""
@@ -128,14 +401,13 @@ def create_source_document_links(source_docs):
     
     return " | ".join(links)
 
-
 def update_feedback(interaction_id, feedback):
     """Update feedback for a specific interaction"""
     try:
         # Simple, direct update using proper SQL escaping
         update_sql = f"""
         UPDATE POC_POLICY.PROCUREMENT_POLICY.CHAT_HISTORY 
-        SET USER_FEEDBACK = '{feedback}'
+        SET RESPONSE_QUALITY = '{feedback}'
         WHERE INTERACTION_ID = '{interaction_id}'
         """
         
@@ -144,14 +416,14 @@ def update_feedback(interaction_id, feedback):
         
         # Verify the update worked by checking the row
         verify_sql = f"""
-        SELECT USER_FEEDBACK, INTERACTION_ID
+        SELECT RESPONSE_QUALITY, INTERACTION_ID
         FROM POC_POLICY.PROCUREMENT_POLICY.CHAT_HISTORY 
         WHERE INTERACTION_ID = '{interaction_id}'
         """
         verify_result = session.sql(verify_sql).collect()
         
         if verify_result:
-            updated_feedback = verify_result[0]['USER_FEEDBACK']
+            updated_feedback = verify_result[0]['RESPONSE_QUALITY']
             return updated_feedback == feedback
         else:
             return False
@@ -191,215 +463,7 @@ def update_hallucination_flag(interaction_id, is_hallucination):
         st.error(f"Error updating hallucination flag: {str(e)}")
         return False
 
-def handle_feedback_buttons():
-    """Handle feedback buttons including hallucination detection"""
-    if not hasattr(st.session_state, 'latest_interaction_id') or not st.session_state.latest_interaction_id:
-        return
-    
-    interaction_id = st.session_state.latest_interaction_id
-    
-    # Create unique keys for this interaction's feedback and hallucination status in session state
-    feedback_session_key = f"feedback_status_{interaction_id}"
-    hallucination_session_key = f"hallucination_status_{interaction_id}"
-    
-    # Initialize both feedback and hallucination status if not in session state
-    if feedback_session_key not in st.session_state or hallucination_session_key not in st.session_state:
-        try:
-            # First check if IS_HALLUCINATION column exists, if not just get USER_FEEDBACK
-            check_column_sql = """
-            SELECT COLUMN_NAME 
-            FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_SCHEMA = 'PROCUREMENT_POLICY' 
-            AND TABLE_NAME = 'CHAT_HISTORY' 
-            AND COLUMN_NAME = 'IS_HALLUCINATION'
-            """
-            column_result = session.sql(check_column_sql).collect()
-            
-            if len(column_result) > 0:
-                # Column exists, query both fields
-                check_sql = f"""
-                SELECT USER_FEEDBACK, IS_HALLUCINATION 
-                FROM POC_POLICY.PROCUREMENT_POLICY.CHAT_HISTORY 
-                WHERE INTERACTION_ID = '{interaction_id}'
-                """
-                result = session.sql(check_sql).collect()
-                
-                if result:
-                    st.session_state[feedback_session_key] = result[0]['USER_FEEDBACK']
-                    st.session_state[hallucination_session_key] = result[0]['IS_HALLUCINATION']
-                else:
-                    st.session_state[feedback_session_key] = None
-                    st.session_state[hallucination_session_key] = None
-            else:
-                # Column doesn't exist yet, only query USER_FEEDBACK
-                check_sql = f"""
-                SELECT USER_FEEDBACK 
-                FROM POC_POLICY.PROCUREMENT_POLICY.CHAT_HISTORY 
-                WHERE INTERACTION_ID = '{interaction_id}'
-                """
-                result = session.sql(check_sql).collect()
-                
-                if result:
-                    st.session_state[feedback_session_key] = result[0]['USER_FEEDBACK']
-                else:
-                    st.session_state[feedback_session_key] = None
-                st.session_state[hallucination_session_key] = None
-                
-        except Exception as e:
-            st.error(f"Error checking feedback: {str(e)}")
-            st.session_state[feedback_session_key] = None
-            st.session_state[hallucination_session_key] = None
-    
-    # Ensure both keys exist in session state
-    if feedback_session_key not in st.session_state:
-        st.session_state[feedback_session_key] = None
-    if hallucination_session_key not in st.session_state:
-        st.session_state[hallucination_session_key] = None
-    
-    current_feedback = st.session_state[feedback_session_key]
-    current_hallucination = st.session_state[hallucination_session_key]
-    
-    st.caption("**Was this response helpful?**")
-    col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 4])
-    
-    with col1:
-        # Thumbs up button
-        if current_feedback == 'good':
-            button_label = "👍 ✓"
-            button_disabled = False
-            button_help = "You rated this as good"
-        else:
-            button_label = "👍 "
-            button_disabled = False
-            button_help = "Rate as good"
-        
-        if st.button(button_label, 
-                    key=f"thumbs_up_{interaction_id}",
-                    help=button_help,
-                    disabled=button_disabled):
-            
-            # Only process if not already rated as good
-            if current_feedback != 'good':
-                if update_feedback(interaction_id, 'good'):
-                    st.session_state[feedback_session_key] = 'good'
-                    st.rerun()  # Rerun to update button appearance
-                else:
-                    st.error("Failed to save feedback. Please try again.")
-    
-    with col2:
-        # Thumbs down button
-        if current_feedback == 'bad':
-            button_label = "👎 ✓"
-            button_disabled = False
-            button_help = "You rated this as bad"
-        else:
-            button_label = "👎 "
-            button_disabled = False
-            button_help = "Rate as bad"
-        
-        if st.button(button_label, 
-                    key=f"thumbs_down_{interaction_id}",
-                    help=button_help,
-                    disabled=button_disabled):
-            
-            # Only process if not already rated as bad
-            if current_feedback != 'bad':
-                if update_feedback(interaction_id, 'bad'):
-                    st.session_state[feedback_session_key] = 'bad'
-                    st.rerun()  # Rerun to update button appearance
-                else:
-                    st.error("Failed to save feedback. Please try again.")
-    
-    with col3:
-        # Hallucination - Yes button
-        if current_hallucination == 'Yes':
-            button_label = "🚫 ✓"
-            button_disabled = False
-            button_help = "You marked this as hallucination"
-        else:
-            button_label = "🚫"
-            button_disabled = False
-            button_help = "Mark as hallucination"
-        
-        if st.button(button_label, 
-                    key=f"hallucination_yes_{interaction_id}",
-                    help=button_help,
-                    disabled=button_disabled):
-            
-            # Only process if not already marked as hallucination
-            if current_hallucination != 'Yes':
-                if update_hallucination_flag(interaction_id, 'Yes'):
-                    st.session_state[hallucination_session_key] = 'Yes'
-                    st.rerun()  # Rerun to update button appearance
-                else:
-                    st.error("Failed to save hallucination flag. Please try again.")
-    
-    
-    # Add labels for hallucination buttons
-    #st.caption("**Hallucination (AI made up info) | ✅ Accurate (info from docs)**")
-
-def store_chat_interaction(question, response, model_name, category, source_docs, response_time_ms):
-    """Store chat interaction - SIMPLIFIED VERSION with hallucination column"""
-    try:
-        # Get current user
-        current_user = get_current_user()
-        
-        # Create source document links
-        source_links = create_source_document_links(source_docs)
-        
-        # Use session.sql with proper parameter binding to avoid SQL injection
-        insert_sql = """
-        INSERT INTO POC_POLICY.PROCUREMENT_POLICY.CHAT_HISTORY 
-        (USER_QUESTION, AI_RESPONSE, MODEL_USED, CATEGORY_FILTER, SOURCE_DOCUMENTS, RESPONSE_TIME_MS, USER_NAME, USER_FEEDBACK, IS_HALLUCINATION)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
-        """
-        
-        # Truncate fields to avoid size issues
-        question_safe = question[:500] if question else ""
-        response_safe = response[:1000] if response else ""
-        source_links_safe = source_links[:2000] if source_links else ""
-        
-        session.sql(insert_sql, params=[
-            question_safe,
-            response_safe, 
-            model_name,
-            category,
-            source_links_safe,
-            response_time_ms,
-            current_user
-        ]).collect()
-        
-        # Get the interaction ID of the just-inserted record
-        get_latest_sql = """
-        SELECT INTERACTION_ID 
-        FROM POC_POLICY.PROCUREMENT_POLICY.CHAT_HISTORY 
-        WHERE USER_NAME = ? 
-        ORDER BY TIMESTAMP DESC 
-        LIMIT 1
-        """
-        result = session.sql(get_latest_sql, params=[current_user]).collect()
-        
-        if result:
-            latest_interaction_id = result[0]['INTERACTION_ID']
-            st.session_state.latest_interaction_id = latest_interaction_id
-            return True
-        else:
-            return False
-        
-    except Exception as e:
-        st.sidebar.error(f"Storage failed: {str(e)}")
-        return False
-
-
-def clear_feedback_state():
-    """Clear feedback state when starting new conversation"""
-    # Clear all feedback-related session state
-    keys_to_remove = [key for key in st.session_state.keys() if key.startswith('feedback_') or key.startswith('hallucination_')]
-    for key in keys_to_remove:
-        del st.session_state[key]
-
-
-### Original Functions
+### Config/Init Functions
      
 def config_options():
     st.sidebar.title("**Chat Configuration**")
@@ -475,7 +539,6 @@ def init_messages():
         for key in summary_keys_to_remove:
             del st.session_state[key]
 
-
 def get_similar_chunks_search_service(query):
     if st.session_state.category_value == "ALL":
         response = svc.search(query, COLUMNS, limit=NUM_CHUNKS)
@@ -531,6 +594,7 @@ def create_prompt(myquestion):
            When answering the question contained between <question> and </question> tags
            be detailed, covering all the relevant information but do not hallucinate. 
            If you don´t have the information just say so.
+           Do not answer any general questions apart from those that might be based on the CONTEXT documents.
            
            Do not mention the CONTEXT used in your answer.
            Do not mention the CHAT HISTORY used in your asnwer.
@@ -558,7 +622,12 @@ def answer_question(myquestion):
     start_time = datetime.now()
     
     prompt, relative_paths, chunks_data = create_prompt(myquestion)
-    response = Complete(st.session_state.model_name, prompt)
+    # response = Complete(st.session_state.model_name, prompt)
+    response = Complete(
+                        model=st.session_state.model_name,
+                        prompt=prompt,
+                        options={'guardrails': True}
+                       )
     
     # Calculate response time
     end_time = datetime.now()
