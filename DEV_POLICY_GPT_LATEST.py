@@ -268,7 +268,7 @@ def handle_feedback_buttons():
         
         # Only show submit button if there's text and it's different from current stored review
         if review_text.strip() and review_text.strip() != (current_review or "").strip():
-            if st.button("💾 Save Review", 
+            if st.button("Save", 
                         key=f"save_review_{interaction_id}",
                         help="Save your review"):
                 if update_review_feedback(interaction_id, review_text.strip()):
